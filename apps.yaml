@@ -1,0 +1,10 @@
+hello_world:
+  module: hello
+  class: HelloWorld
+
+mm_auto_label:
+  module: mm_auto_label
+  class: MMAutoLabel
+  mm_user_id: !secret mm_user_id
+  mm_token: !secret mm_token
+
