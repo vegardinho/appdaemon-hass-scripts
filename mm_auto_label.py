@@ -30,10 +30,11 @@ class MMAutoLabel(hass.Hass):
         """
         Calculate Mattermost status based on calendar events and Home Assistant location.
         """
-        self.log(f"Triggered by \"{entity}\" with new state \"{new}\"")
+        self.log(f"\nTriggered by \"{entity}\" with new state \"{new}\"")
         
         # Get current zone of the person
         zone = self.get_state("person.vegard_landsverk")
+        self.log(f"Current zone: {zone}")
 
         # Get current iOS focus
         current_focus = self.get_state("input_text.ios_focus")
@@ -43,10 +44,12 @@ class MMAutoLabel(hass.Hass):
         active_uio_event = uio_event.get("state") == "on"
         uio_event_location = uio_event.get("attributes", {}).get("location", "")
         uio_event_title = uio_event.get("attributes", {}).get("message", "")
+        self.log(f"UIO event: {uio_event_title} at {uio_event_location}")
 
         # Get details of the job event
         job_event = self.get_state("calendar.jobb", attribute="all")
         active_job_event = job_event.get("state") == "on" if job_event else False
+        self.log(f"Job event: {job_event}")
 
         # Set fallback values
         status_text = "Svever rundt i eteren"
