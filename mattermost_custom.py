@@ -12,12 +12,9 @@ class MattermostCustom:
         # Base custom status
         custom_status = {
             "emoji": emoji,
-            "text": text
+            "text": text,
+            "expires_at": expires
         }
-
-        # Conditionally add expires_at if it is not None
-        if expires is not None:
-            custom_status["expires_at"] = expires
 
         # Convert custom_status to JSON and ensure UTF-8 encoding
         custom_status_json = json.dumps(custom_status, ensure_ascii=False).encode('utf-8')
