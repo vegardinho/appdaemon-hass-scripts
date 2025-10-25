@@ -4,7 +4,7 @@ mm_auto_label:
   mm_user_id: !secret mm_user_id
   mm_token: !secret mm_token
 
-auto_scene:
-  module: auto_scene
-  class: AutoScene
+# auto_scene:
+#   module: auto_scene
+#   class: AutoScene
 

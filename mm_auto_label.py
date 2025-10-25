@@ -31,7 +31,7 @@ class MmAutoLabel(hass.Hass):
             self.calculate_status, "calendar.it_hjelp", attribute="all", immediate=True
         )
 
-    def calculate_status(self, entity, attribute, old, new, kwargs):
+    def calculate_status(self, entity, attribute, old, new, **kwargs):
         """
         Calculate Mattermost status based on calendar events and Home Assistant location.
         """
@@ -91,16 +91,48 @@ class MmAutoLabel(hass.Hass):
                 emoji = "speech_balloon"
                 expires = uio_event.get("attributes", {}).get("end_time")
 
+        # Helper to safely convert various time representations to an Arrow object
+        def _to_arrow(value):
+            """Return an arrow.Arrow for value, or None if it cannot be parsed."""
+            if not value:
+                return None
+            # If it's already a datetime
+            if isinstance(value, datetime):
+                try:
+                    return arrow.get(value).to("Europe/Oslo")
+                except Exception:
+                    return None
+            # If it's a string, try isoformat first, then fallback to arrow parsing
+            if isinstance(value, str):
+                try:
+                    return arrow.get(datetime.fromisoformat(value), tzinfo="Europe/Oslo")
+                except Exception:
+                    try:
+                        return arrow.get(value).to("Europe/Oslo")
+                    except Exception:
+                        return None
+            # Fallback: let arrow try to handle it
+            try:
+                return arrow.get(value).to("Europe/Oslo")
+            except Exception:
+                return None
+
         # Make sure there is an expiration time, then convert to iso format
         if not expires:
-            job_expire = arrow.get(datetime.fromisoformat(job_event.get("attributes", {}).get("start_time")), tzinfo="Europe/Oslo")
-            uio_expire = arrow.get(datetime.fromisoformat(uio_event.get("attributes", {}).get("start_time")), tzinfo="Europe/Oslo")
-            expires = job_expire if job_expire > uio_expire else uio_expire
+            job_start = job_event.get("attributes", {}).get("start_time") if job_event else None
+            uio_start = uio_event.get("attributes", {}).get("start_time") if uio_event else None
+            job_expire = _to_arrow(job_start)
+            uio_expire = _to_arrow(uio_start)
+
+            # Choose the later of the two start times if available
+            if job_expire and uio_expire:
+                expires_arrow = job_expire if job_expire > uio_expire else uio_expire
+            else:
+                expires_arrow = job_expire or uio_expire
         else:
-            expires = arrow.get(
-                datetime.fromisoformat(expires), tzinfo="Europe/Oslo"
-            )
-        expires = expires.isoformat() 
+            expires_arrow = _to_arrow(expires)
+
+        expires = expires_arrow.isoformat() if expires_arrow else None
 
 
         # Append location to status if job or uio event
@@ -115,7 +147,14 @@ class MmAutoLabel(hass.Hass):
         )
 
         # Set new Mattermost status and iOS focus
-        self.mattermost.set_status(emoji=emoji, text=status_text, expires=expires)
+        try:
+            self.mattermost.set_status(emoji=emoji, text=status_text, expires=expires)
+        except ValueError as e:
+            # Token expired or invalid
+            self.log(f"ERROR: {e}", level="ERROR")
+        except Exception as e:
+            # Other errors
+            self.log(f"ERROR: Failed to update Mattermost status: {e}", level="ERROR")
 
         # if current_focus != focus:
         #     self.set_focus(focus)
