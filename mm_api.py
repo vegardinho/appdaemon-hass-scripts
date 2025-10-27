@@ -35,7 +35,7 @@ class MattermostCustom:
             
             # Check for authentication errors specifically
             if response.status_code == 401:
-                error_msg = "Mattermost API token is expired or invalid. Please generate a new Personal Access Token from Mattermost (Profile → Security → Personal Access Tokens) and update mm_token in secrets.yaml"
+                error_msg = "Mattermost API token is expired or invalid. Please find new token by inspecting network request 'client?format=old' and updating secrets.yaml file."
                 print(f"✗ {error_msg}")
                 raise ValueError(error_msg)
             

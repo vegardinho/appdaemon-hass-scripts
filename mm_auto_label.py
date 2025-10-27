@@ -17,6 +17,7 @@ class MmAutoLabel(hass.Hass):
         self.token = self.args.get("mm_token")
         self.mattermost = MattermostCustom(self.user_id, self.token)
 
+
         # Listen for state changes in person and calendar entities
         self.listen_state(
             self.calculate_status, "person.vegard_landsverk", immediate=True
@@ -81,7 +82,7 @@ class MmAutoLabel(hass.Hass):
             if "PSYC" in uio_event_title:
                 # Separate if-check to not register absent lecture as meeting
                 if zone in uio_event_location:
-                    status_text = "På forelesning"
+                    status_text = "I forelesning"
                     emoji = "books"
                     focus = "Estudiar"
                     work = False
@@ -150,8 +151,39 @@ class MmAutoLabel(hass.Hass):
         try:
             self.mattermost.set_status(emoji=emoji, text=status_text, expires=expires)
         except ValueError as e:
-            # Token expired or invalid
+            # Token expired or invalid - send email notification
             self.log(f"ERROR: {e}", level="ERROR")
+            try:
+                self.call_service(
+                    "notify/smtp_gmail",
+                    service_data={
+                        "title": "⚠️ Mattermost Token Expired",
+                        "message": f"Your Mattermost API token has expired or is invalid.\n\n"
+                                f"Error: {e}\n\n"
+                                f"Please:\n"
+                                f"1. Log into Mattermost at https://mattermost.uio.no\n"
+                                f"2. In inspect element, go to network tab and find \"client?format=old\"\n"
+                                f"3. Copy \"MMAUTHTOKEN\" and \"MMUSERID\"\n"
+                                f"4. Update mm_token and mm_user_id in /opt/appdaemon/conf/secrets.yaml\n"
+                                f"5. Restart AppDaemon: sudo docker compose restart appdaemon\n\n"
+                                f"Sent by Home Assistant AppDaemon.",
+                        "target": "landsverk.vegard@gmail.com"
+                    }
+                )
+            except Exception as notify_error:
+                self.log(f"Could not send email notification: {notify_error}", level="WARNING")
+            
+            # Also send mobile app notification
+            try:
+                self.call_service(
+                    "notify/mobile_app_vegards_telefonino_v2",
+                    service_data={
+                        "title": "⚠️ Mattermost Token Expired",
+                        "message": "Your Mattermost API token has expired. Check your email for instructions."
+                    }
+                )
+            except Exception as notify_error:
+                self.log(f"Could not send mobile app notification: {notify_error}", level="WARNING")
         except Exception as e:
             # Other errors
             self.log(f"ERROR: Failed to update Mattermost status: {e}", level="ERROR")
@@ -163,12 +195,12 @@ class MmAutoLabel(hass.Hass):
         """
         Sets iOS focus by sending custom mail that triggers focus automation on iPhone.
         """
-        title = "[APPDAEMON] Set iOS focus"
-        message = f"Trigger automation to set focus to {focus}\n\nSent by Home Assistant SMTP integration."
         self.log(f"Sending email to change focus")
         self.call_service(
             "notify/smtp_gmail",
-            title=title,
-            message=message,
-            target="vegard.landsverk@icloud.com",
+            service_data={
+                "title": "[APPDAEMON] Set iOS focus",
+                "message": f"Trigger automation to set focus to {focus}\n\nSent by Home Assistant SMTP integration.",
+                "target": "vegard.landsverk@icloud.com"
+            }
         )
