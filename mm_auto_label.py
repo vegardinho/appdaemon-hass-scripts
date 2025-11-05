@@ -17,7 +17,6 @@ class MmAutoLabel(hass.Hass):
         self.token = self.args.get("mm_token")
         self.mattermost = MattermostCustom(self.user_id, self.token)
 
-
         # Listen for state changes in person and calendar entities
         self.listen_state(
             self.calculate_status, "person.vegard_landsverk", immediate=True
@@ -31,6 +30,43 @@ class MmAutoLabel(hass.Hass):
         self.listen_state(
             self.calculate_status, "calendar.it_hjelp", attribute="all", immediate=True
         )
+
+        # Run every 5 minutes
+        self.run_every(self.periodic_update, "now", "00:05:00")
+
+    def periodic_update(self, kwargs):
+        """
+        Periodic callback for run_every - calls calculate_status with dummy values.
+        """
+        # Call calculate_status with None values for scheduler-triggered updates
+        self.calculate_status("Timer", None, None, None)
+
+    def job_events_today(self):
+        """
+        Check if there are any job events scheduled for today.
+        
+        Returns:
+            bool: True if there are job events today, False otherwise.
+        """
+        try:
+            now = arrow.now("Europe/Oslo")
+            start_of_day = now.replace(hour=0, minute=0, second=0).format("YYYY-MM-DD HH:mm:ss")
+            end_of_day = now.replace(hour=23, minute=59, second=59).format("YYYY-MM-DD HH:mm:ss")
+            
+            result = self.call_service(
+                "calendar/get_events",
+                entity_id="calendar.it_hjelp",
+                start_date_time=start_of_day,
+                end_date_time=end_of_day,
+            )
+            
+            events = result.get("result", {}).get("response", {}).get("calendar.it_hjelp", {}).get("events", [])
+            has_events = len(events) > 0
+            self.log(f"Job calendar has {len(events)} event(s) today")
+            return has_events
+        except Exception as e:
+            self.log(f"Error checking job calendar events: {e}", level="WARNING")
+            return False
 
     def calculate_status(self, entity, attribute, old, new, **kwargs):
         """
@@ -78,15 +114,17 @@ class MmAutoLabel(hass.Hass):
 
         # Update status if there is an active university event
         if active_uio_event:
-            # Set to studying only if present at lecture
+            # Study event
             if "PSYC" in uio_event_title:
-                # Separate if-check to not register absent lecture as meeting
-                if zone in uio_event_location:
+                # Set to studying only if present at lecture and work shift today
+                # Separate if-check to not register off-campus lecture as meeting
+                if zone in uio_event_location and self.job_events_today():
                     status_text = "I forelesning"
                     emoji = "books"
                     focus = "Estudiar"
                     work = False
                     expires = uio_event.get("attributes", {}).get("end_time")
+            # Assume job-related event
             else:
                 status_text = "I møte"
                 emoji = "speech_balloon"
