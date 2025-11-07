@@ -1,6 +1,7 @@
 import hassapi as hass
 from datetime import datetime
 from mm_api import MattermostCustom
+from notify_service import send_email, send_mobile_notification
 import arrow
 
 
@@ -158,18 +159,27 @@ class MmAutoLabel(hass.Hass):
 
         # Make sure there is an expiration time, then convert to iso format
         if not expires:
+            # No active event - set expires to when next work event starts
+            # (don't consider study events since they require location check)
             job_start = job_event.get("attributes", {}).get("start_time") if job_event else None
-            uio_start = uio_event.get("attributes", {}).get("start_time") if uio_event else None
-            job_expire = _to_arrow(job_start)
-            uio_expire = _to_arrow(uio_start)
+            job_start_arrow = _to_arrow(job_start)
 
-            # Choose the later of the two start times if available
-            if job_expire and uio_expire:
-                expires_arrow = job_expire if job_expire > uio_expire else uio_expire
+            # Get the next upcoming work event (start time in the future)
+            now = arrow.now("Europe/Oslo")
+            
+            if job_start_arrow and job_start_arrow > now:
+                # Expire at the start of the next work event
+                expires_arrow = job_start_arrow
+                self.log(f"No active event - expires set to next work event start: {expires_arrow}")
             else:
-                expires_arrow = job_expire or uio_expire
+                # No future work events - don't set expiry
+                expires_arrow = None
+                self.log("Default status with no future work events - no expiry set")
         else:
+            # Active event - use its end time
             expires_arrow = _to_arrow(expires)
+            if expires_arrow:
+                self.log(f"Active event - expires at end time: {expires_arrow}")
 
         expires = expires_arrow.isoformat() if expires_arrow else None
 
@@ -189,39 +199,27 @@ class MmAutoLabel(hass.Hass):
         try:
             self.mattermost.set_status(emoji=emoji, text=status_text, expires=expires)
         except ValueError as e:
-            # Token expired or invalid - send email notification
+            # Token expired or invalid - send notifications
             self.log(f"ERROR: {e}", level="ERROR")
-            try:
-                self.call_service(
-                    "notify/smtp_gmail",
-                    service_data={
-                        "title": "⚠️ Mattermost Token Expired",
-                        "message": f"Your Mattermost API token has expired or is invalid.\n\n"
-                                f"Error: {e}\n\n"
-                                f"Please:\n"
-                                f"1. Log into Mattermost at https://mattermost.uio.no\n"
-                                f"2. In inspect element, go to network tab and find \"client?format=old\"\n"
-                                f"3. Copy \"MMAUTHTOKEN\" and \"MMUSERID\"\n"
-                                f"4. Update mm_token and mm_user_id in /opt/appdaemon/conf/secrets.yaml\n"
-                                f"5. Restart AppDaemon: sudo docker compose restart appdaemon\n\n"
-                                f"Sent by Home Assistant AppDaemon.",
-                        "target": "landsverk.vegard@gmail.com"
-                    }
-                )
-            except Exception as notify_error:
-                self.log(f"Could not send email notification: {notify_error}", level="WARNING")
             
-            # Also send mobile app notification
-            try:
-                self.call_service(
-                    "notify/mobile_app_vegards_telefonino_v2",
-                    service_data={
-                        "title": "⚠️ Mattermost Token Expired",
-                        "message": "Your Mattermost API token has expired. Check your email for instructions."
-                    }
-                )
-            except Exception as notify_error:
-                self.log(f"Could not send mobile app notification: {notify_error}", level="WARNING")
+            email_message = (
+                f"Your Mattermost API token has expired or is invalid.\n\n"
+                f"Error: {e}\n\n"
+                f"Please:\n"
+                f"1. Log into Mattermost at https://mattermost.uio.no\n"
+                f"2. In inspect element, go to network tab and find \"client?format=old\"\n"
+                f"3. Copy \"MMAUTHTOKEN\" and \"MMUSERID\"\n"
+                f"4. Update mm_token and mm_user_id in /opt/appdaemon/conf/secrets.yaml\n"
+                f"5. Restart AppDaemon: sudo docker compose restart appdaemon\n\n"
+                f"Sent by Home Assistant AppDaemon."
+            )
+            
+            send_email(self, "⚠️ Mattermost Token Expired", email_message)
+            send_mobile_notification(
+                self, 
+                "⚠️ Mattermost Token Expired",
+                "Your Mattermost API token has expired. Check your email for instructions."
+            )
         except Exception as e:
             # Other errors
             self.log(f"ERROR: Failed to update Mattermost status: {e}", level="ERROR")
@@ -234,11 +232,9 @@ class MmAutoLabel(hass.Hass):
         Sets iOS focus by sending custom mail that triggers focus automation on iPhone.
         """
         self.log(f"Sending email to change focus")
-        self.call_service(
-            "notify/smtp_gmail",
-            service_data={
-                "title": "[APPDAEMON] Set iOS focus",
-                "message": f"Trigger automation to set focus to {focus}\n\nSent by Home Assistant SMTP integration.",
-                "target": "vegard.landsverk@icloud.com"
-            }
+        send_email(
+            self,
+            "[APPDAEMON] Set iOS focus",
+            f"Trigger automation to set focus to {focus}\n\nSent by Home Assistant SMTP integration.",
+            target="vegard.landsverk@icloud.com"
         )
