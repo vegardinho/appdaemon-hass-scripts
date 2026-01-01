@@ -41,6 +41,32 @@ class MmAutoLabel(hass.Hass):
         """
         # Call calculate_status with None values for scheduler-triggered updates
         self.calculate_status("Timer", None, None, None)
+    
+    # Helper to safely convert various time representations to an Arrow object
+    def _to_arrow(self, value):
+        """Return an arrow.Arrow for value, or None if it cannot be parsed."""
+        if not value:
+            return None
+        # If it's already a datetime
+        if isinstance(value, datetime):
+            try:
+                return arrow.get(value).to("Europe/Oslo")
+            except Exception:
+                return None
+        # If it's a string, try isoformat first, then fallback to arrow parsing
+        if isinstance(value, str):
+            try:
+                return arrow.get(datetime.fromisoformat(value), tzinfo="Europe/Oslo")
+            except Exception:
+                try:
+                    return arrow.get(value).to("Europe/Oslo")
+                except Exception:
+                    return None
+        # Fallback: let arrow try to handle it
+        try:
+            return arrow.get(value).to("Europe/Oslo")
+        except Exception:
+            return None
 
     def job_events_today(self):
         """
@@ -84,6 +110,9 @@ class MmAutoLabel(hass.Hass):
 
         # Get details of the uio event
         uio_event = self.get_state("calendar.calendario", attribute="all")
+        if uio_event and uio_event.get("state") == "unavailable":
+            self.log("ERROR: calendar.calendario is unavailable - stopping execution", level="ERROR")
+            return
         active_uio_event = uio_event.get("state") == "on"
         uio_event_location = uio_event.get("attributes", {}).get("location", "")
         uio_event_title = uio_event.get("attributes", {}).get("message", "")
@@ -93,10 +122,14 @@ class MmAutoLabel(hass.Hass):
 
         # Get details of the job event
         job_event = self.get_state("calendar.it_hjelp", attribute="all")
+        if job_event and job_event.get("state") == "unavailable":
+            self.log("ERROR: calendar.it_hjelp is unavailable - stopping execution", level="ERROR")
+            return
         active_job_event = job_event.get("state") == "on" if job_event else False
         self.log(
             f'Job event ({"active" if active_job_event else "not active"}): "{job_event}"'
         )
+        job_start_arrow = self._to_arrow(job_event.get("attributes", {}).get("start_time") if job_event else None)
 
         # Set fallback values
         status_text = "Svever rundt i eteren"
@@ -131,56 +164,19 @@ class MmAutoLabel(hass.Hass):
                 emoji = "speech_balloon"
                 expires = uio_event.get("attributes", {}).get("end_time")
 
-        # Helper to safely convert various time representations to an Arrow object
-        def _to_arrow(value):
-            """Return an arrow.Arrow for value, or None if it cannot be parsed."""
-            if not value:
-                return None
-            # If it's already a datetime
-            if isinstance(value, datetime):
-                try:
-                    return arrow.get(value).to("Europe/Oslo")
-                except Exception:
-                    return None
-            # If it's a string, try isoformat first, then fallback to arrow parsing
-            if isinstance(value, str):
-                try:
-                    return arrow.get(datetime.fromisoformat(value), tzinfo="Europe/Oslo")
-                except Exception:
-                    try:
-                        return arrow.get(value).to("Europe/Oslo")
-                    except Exception:
-                        return None
-            # Fallback: let arrow try to handle it
-            try:
-                return arrow.get(value).to("Europe/Oslo")
-            except Exception:
-                return None
+        
 
-        # Make sure there is an expiration time, then convert to iso format
-        if not expires:
-            # No active event - set expires to when next work event starts
-            # (don't consider study events since they require location check)
-            job_start = job_event.get("attributes", {}).get("start_time") if job_event else None
-            job_start_arrow = _to_arrow(job_start)
-
-            # Get the next upcoming work event (start time in the future)
-            now = arrow.now("Europe/Oslo")
-            
-            if job_start_arrow and job_start_arrow > now:
-                # Expire at the start of the next work event
-                expires_arrow = job_start_arrow
-                self.log(f"No active event - expires set to next work event start: {expires_arrow}")
-            else:
-                # No future work events - don't set expiry
-                expires_arrow = None
-                self.log("Default status with no future work events - no expiry set")
-        else:
+        if expires:
             # Active event - use its end time
-            expires_arrow = _to_arrow(expires)
+            expires_arrow = self._to_arrow(expires)
             if expires_arrow:
                 self.log(f"Active event - expires at end time: {expires_arrow}")
+        elif job_start_arrow and job_start_arrow > arrow.now("Europe/Oslo"):
+            # No active event - set expires to when next work event starts
+            expires_arrow = job_start_arrow
+            self.log(f"No active event - expires set to next work event start: {expires_arrow}") 
 
+        # Don't set expiry if there are no future work events
         expires = expires_arrow.isoformat() if expires_arrow else None
 
 
