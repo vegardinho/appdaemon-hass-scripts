@@ -5,8 +5,16 @@
 #   mm_token: !secret mm_token
 
 scene_transition:
-  module: scene_transition
-  class: SceneTransition
+ module: scene_transition
+ class: SceneTransition
+
+calendar_scene_state:
+  module: calendar_scene_state
+  class: CalendarSceneState
+
+toggle_light:
+  module: toggle_light
+  class: ToggleLight
 
 shelly_controller:
   module: shelly_controller

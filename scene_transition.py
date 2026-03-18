@@ -4,6 +4,15 @@ import asyncio
 import traceback
 
 
+class TransitionError(Exception):
+    """Exception raised when a scene transition fails validation."""
+    def __init__(self, message: str, entity_id: str = None, step: int = None):
+        self.message = message
+        self.entity_id = entity_id
+        self.step = step
+        super().__init__(message)
+
+
 class SceneTransition(hass.Hass):
     async def initialize(self):
         """
@@ -15,6 +24,7 @@ class SceneTransition(hass.Hass):
         self.hue_difference_threshold = (
             120  # Threshold for first transitioning to white color
         )
+        self._active_scenes = {}  # {scene_entity_id: {"tasks": {entity_id: task, ...}}}
         self.log("SceneTransition initialized")
         # await self.apply_scene("scene.tv_stue_formiddag", transition_seconds=35)  # Example scene transition
         # await self.apply_scene("scene.tv_stue_natt", transition_seconds=35)  # Example scene transition
@@ -79,6 +89,23 @@ class SceneTransition(hass.Hass):
 
         return scene_entities
 
+    async def get_scene_light_entities(self, scene_entity_id):
+        """
+        Get list of light entity IDs from a scene.
+        
+        Args:
+            scene_entity_id (str): The scene entity ID.
+            
+        Returns:
+            list: List of light entity IDs in the scene, or empty list if error.
+        """
+        try:
+            scene_config = await self.load_scene_configuration(scene_entity_id)
+            return [entity_id for entity_id in scene_config.keys() if entity_id.startswith("light.")]
+        except Exception as e:
+            self.log(f"Error getting scene lights for {scene_entity_id}: {e}", level="ERROR")
+            return []
+
     async def get_light_attributes(self, entity_id):
         """
         Get the current state of a light entity.
@@ -105,217 +132,403 @@ class SceneTransition(hass.Hass):
             "color_temp_kelvin": color_temp_kelvin,
         }
 
-    async def transition_steps(
-        self, entity_id, current_values, target_values, transition_time, attributes, phase_name=None
-    ):
+    async def validate_transition_state(self, entity_id, target_values, validation_key, error_message):
         """
-        Gradually transition light attributes over a specified time with constant rate of change.
+        Validate that light has reached target state after transition.
+        Raises TransitionError if validation fails.
+        
+        Args:
+            entity_id: The light entity ID
+            target_values: Target attributes to validate against (dict with brightness, hs_color, color_temp_kelvin)
+            validation_key: Key to check in is_at_target result ('brightness' or 'color')
+            error_message: Descriptive error message to log if validation fails
+            
+        Raises:
+            TransitionError: If validation fails
+        """
+        current = await self.get_light_attributes(entity_id)
+        match_status = self.is_at_target(current, target_values)
+        
+        if not match_status[validation_key]:
+            # Build detailed error message with actual vs expected values
+            if validation_key == "brightness":
+                actual_brightness = current.get("brightness")
+                expected_brightness = target_values.get("brightness")
+                detailed_msg = f"Brightness mismatch: expected {expected_brightness}, got {actual_brightness}"
+            elif validation_key == "color":
+                if target_values.get("color_temp_kelvin") is not None:
+                    actual_temp = current.get("color_temp_kelvin")
+                    expected_temp = target_values.get("color_temp_kelvin")
+                    detailed_msg = f"Color temp mismatch: expected {expected_temp}K, got {actual_temp}K"
+                else:
+                    actual_color = current.get("hs_color")
+                    expected_color = target_values.get("hs_color")
+                    detailed_msg = f"HS Color mismatch: expected {expected_color}, got {actual_color}"
+            else:
+                detailed_msg = error_message
+            
+            error_msg = f"Lights not at expected value according to transition step. {detailed_msg} for {entity_id}"
+            self.log(error_msg, level="ERROR")
+            raise ValueError(error_msg)
 
+    def is_at_target(self, current_values, target_values, brightness_tolerance=2, hue_tolerance=2, sat_tolerance=2, color_temp_tolerance=50):
+        """
+        Check if current values match target values within tolerances.
+        
+        Args:
+            current_values (dict): Current light attributes.
+            target_values (dict): Target light attributes.
+            brightness_tolerance (int): Tolerance for brightness comparison.
+            hue_tolerance (int): Tolerance for hue comparison.
+            sat_tolerance (int): Tolerance for saturation comparison.
+            color_temp_tolerance (int): Tolerance for color temperature comparison.
+            
+        Returns:
+            dict: {'brightness': bool, 'color': bool, 'overall': bool}
+        """
+        brightness_match = abs(current_values["brightness"] - target_values["brightness"]) <= brightness_tolerance
+        
+        use_color_temp = target_values.get("color_temp_kelvin") is not None
+        
+        if use_color_temp:
+            color_match = (
+                current_values.get("color_temp_kelvin") is not None and
+                abs(current_values["color_temp_kelvin"] - target_values["color_temp_kelvin"]) <= color_temp_tolerance
+            )
+        else:
+            hue_match = abs(current_values["hs_color"][0] - target_values["hs_color"][0]) <= hue_tolerance
+            sat_match = abs(current_values["hs_color"][1] - target_values["hs_color"][1]) <= sat_tolerance
+            color_match = hue_match and sat_match
+        
+        return {
+            'brightness': brightness_match,
+            'color': color_match,
+            'overall': brightness_match and color_match
+        }
+
+    async def verify_and_correct_target(self, entity_id, target_values):
+        """
+        Verify that light has reached target values and apply corrections if needed.
+        
         Args:
             entity_id (str): The entity ID of the light.
-            current_values (dict): Current attribute values in the format returned by get_light_attributes.
-            target_values (dict): Target attribute values in the same format.
-            transition_time (int): Total transition time in seconds.
-            attributes (list): List of attributes to transition (e.g., ["hs_color", "brightness"]).
-            phase_name (str): Optional name for this transition phase (e.g., "Phase 1: To white").
+            target_values (dict): Target attribute values.
         """
-        try:
-            if phase_name:
-                self.log(f"{phase_name} - {transition_time}s transition starting")
+        final_values = await self.get_light_attributes(entity_id)
+        match_status = self.is_at_target(final_values, target_values)
+        
+        corrections_needed = []
+        use_color_temp = target_values.get("color_temp_kelvin") is not None
+        
+        if not match_status['brightness']:
+            self.log(f"Brightness mismatch: {final_values['brightness']} vs target {target_values['brightness']}")
+            corrections_needed.append("brightness")
+        
+        if not match_status['color']:
+            if use_color_temp:
+                self.log(f"Color temp mismatch: {final_values.get('color_temp_kelvin')} vs target {target_values['color_temp_kelvin']}")
+                corrections_needed.append("color_temp")
+            else:
+                self.log(f"HS color mismatch: {final_values['hs_color']} vs target {target_values['hs_color']}")
+                corrections_needed.append("hs_color")
+        
+        # Apply corrections sequentially if needed
+        if corrections_needed:
+            self.log(f"Applying corrections for {entity_id}: {corrections_needed}")
             
-            # Calculate number of full steps and remainder
-            full_steps = transition_time // self.transition_step_seconds
-            remainder = transition_time % self.transition_step_seconds
+            if "brightness" in corrections_needed:
+                await self.turn_on(entity_id=entity_id, brightness=target_values["brightness"], transition=1)
+                await self.sleep(1)
             
-            # Filter out attributes with None values in target
-            valid_attributes = [
-                attr for attr in attributes 
-                if target_values.get(attr) is not None
-            ]
+            if "color_temp" in corrections_needed:
+                await self.turn_on(entity_id=entity_id, color_temp_kelvin=target_values["color_temp_kelvin"], transition=1)
+                await self.sleep(1)
             
-            # Calculate rate of change per second for each valid attribute
-            rates = {}
-            for attr in valid_attributes:
-                if attr == "hs_color":
-                    current_hue, current_sat = current_values["hs_color"]
-                    target_hue, target_sat = target_values["hs_color"]
-                    rates["hue"] = (target_hue - current_hue) / transition_time
-                    rates["sat"] = (target_sat - current_sat) / transition_time
-                else:
-                    rates[attr] = (target_values[attr] - current_values[attr]) / transition_time
-            
-            # Track elapsed time and current position
-            elapsed_time = 0
-            
-            for step in range(full_steps + (1 if remainder > 0 else 0)):
-                # Determine step duration (full step or remainder)
-                is_last_step = (step == full_steps)
-                step_duration = remainder if is_last_step else self.transition_step_seconds
-                elapsed_time += step_duration
-                
-                # Calculate target values for this step based on elapsed time
-                intermediate_values = {}
-                for attr in valid_attributes:
-                    if attr == "hs_color":
-                        current_hue, current_sat = current_values["hs_color"]
-                        # Use exact target on last step to avoid rounding errors
-                        if is_last_step and remainder > 0:
-                            intermediate_values["hs_color"] = target_values["hs_color"]
-                        else:
-                            new_hue = current_hue + rates["hue"] * elapsed_time
-                            new_sat = current_sat + rates["sat"] * elapsed_time
-                            intermediate_values["hs_color"] = (round(new_hue), round(new_sat))
-                    else:
-                        # Use exact target on last step to avoid rounding errors
-                        if is_last_step and remainder > 0:
-                            intermediate_values[attr] = target_values[attr]
-                        else:
-                            intermediate_values[attr] = round(
-                                current_values[attr] + rates[attr] * elapsed_time
-                            )
-                
-                total_steps = full_steps + (1 if remainder > 0 else 0)
-                step_label = f"Step {step + 1}/{total_steps}"
-                if phase_name:
-                    step_label = f"{phase_name} - {step_label}"
-                
-                self.log(f"{step_label} - Target: {intermediate_values}")
+            if "hs_color" in corrections_needed:
+                await self.turn_on(entity_id=entity_id, hs_color=target_values["hs_color"], transition=1)
+                await self.sleep(1)
 
-                # Prepare service data for the transition (only include valid attributes)
-                service_data = {attr: intermediate_values[attr] for attr in valid_attributes}
-                # Halve step duration because we transition color and brightness separately
-                half_step_duration = step_duration / 2
-                service_data["transition"] = half_step_duration
-
-                # First transition brightness, then hue/color temp (bulbs can't change both simultaneously)
-                trans_attr = {
-                    k: v
-                    for k, v in service_data.items()
-                    if k not in ["hs_color", "color_temp_kelvin"]
-                }
-                self.log(f"{step_label} a) - Brightness sub-transition ({half_step_duration}s): {trans_attr}")
-                await self.turn_on(entity_id=entity_id, **trans_attr)
-                await self.sleep(half_step_duration)
-
-                trans_attr = {
-                    k: v for k, v in service_data.items() if k != "brightness"
-                }
-                self.log(f"{step_label} b) - Color sub-transition ({half_step_duration}s): {trans_attr}")
-                await self.turn_on(entity_id=entity_id, **trans_attr)
-                await self.sleep(half_step_duration)
-
-                # Check if the transition was interrupted (if light attributes are not as expected)
-                current_attributes = await self.get_light_attributes(entity_id)
-                self.log(
-                    f"{step_label} - Result: {current_attributes}"
-                )
-                
-                # Only check attributes that were actually transitioned and are not None
-                mismatch = False
-                for attr in valid_attributes:
-                    if attr == "color_temp_kelvin":
-                        # Use tolerance for color temp comparison
-                        if intermediate_values.get(attr) is not None and current_attributes.get(attr) is not None:
-                            if abs(current_attributes[attr] - intermediate_values[attr]) > 50:
-                                mismatch = True
-                                break
-                    elif attr != "hs_color":
-                        # Direct comparison for other attributes
-                        if current_attributes.get(attr) != intermediate_values[attr]:
-                            mismatch = True
-                            break
-                
-                if mismatch:
-                    self.log(
-                        f"Current values does not match target values for step transition. Cancelling transition. {entity_id}",
-                        level="WARNING",
-                    )
-                    return
-        except Exception as _:
-            self.log(
-                f"Error during transition for {entity_id}: {traceback.format_exc()}",
-                level="ERROR",
-            )
-
-    async def transition_to_scene(self, entity_id, target_values, transition_seconds):
+    async def transition_to_scene(self, entity_id, target_values, transition_seconds, scene_entity_id):
         """
-        Transition a light to the target values, handling both color temperature and hue.
+        Transition a light to the target values with brightness and color adjustments.
 
         Args:
             entity_id (str): The entity ID of the light.
             target_values (dict): Target attribute values.
             transition_seconds (int): Transition time in seconds.
+            scene_entity_id (str): The scene entity ID (for error tracking).
         """
         try:
-            # Get the current light attributes
+            # Get current state
             current_values = await self.get_light_attributes(entity_id)
-
-            if (
-                current_values["hs_color"] is None
-                or len(current_values["hs_color"]) != 2
-            ):
-                raise ValueError(
-                    f"Invalid hs_color for {entity_id}: {current_values['hs_color']}"
-                )
-
-            transition_time = transition_seconds
-
-            # Determine whether to transition using color temperature or hue
-            # Use color temp mode only if BOTH current and target have non-None color_temp
-            if (
-                target_values.get("color_temp_kelvin") is not None
-                and current_values.get("color_temp_kelvin") is not None
-            ):
-                # Transition using color temperature
-                attributes = ["color_temp_kelvin", "brightness"]
-            else:
-                # Transition using hue (even if current is in white mode)
-                attributes = ["hs_color", "brightness"]
-
-                # Calculate hue difference and handle threshold
-                hue_diff = abs(
-                    current_values["hs_color"][0] - target_values["hs_color"][0]
-                )
-                if hue_diff > self.hue_difference_threshold:
-                    self.log(
-                        f"Hue difference {hue_diff} exceeds threshold {self.hue_difference_threshold}, using 2-phase transition for {entity_id}"
-                    )
-                    # Split transition time in half for two-stage transition
-                    first_transition_time = transition_seconds // 2
-                    # Transition to white color first
-                    await self.transition_steps(
-                        entity_id,
-                        current_values,
-                        {"hs_color": (0, 0), "brightness": target_values["brightness"]},
-                        first_transition_time,
-                        ["hs_color", "brightness"],
-                        phase_name="Phase 1: To white",
-                    )
-                    # Update current values and transition time for second stage
-                    current_values = await self.get_light_attributes(entity_id)
-                    transition_time = transition_seconds - first_transition_time
-
-            # Determine phase name for logging
-            if hue_diff > self.hue_difference_threshold:
-                phase_name = "Phase 2: To target color"
-            else:
-                phase_name = None
             
-            # Perform the final transition to the target values
-            await self.transition_steps(
-                entity_id,
-                current_values,
-                target_values,
-                transition_time,
-                attributes,
-                phase_name=phase_name,
-            )
-            self.log(f"Transition completed for {entity_id}")
-        except Exception as e:
+            # If light is off, current hs_color will be None - that's expected
+            # We'll still transition it to the target scene values
+            if current_values["hs_color"] is None:
+                # Light is off - use target values as the baseline for "current" color
+                # This allows us to transition brightness from 0 to target
+                self.log(f"Light {entity_id} is currently off, will transition from off state")
+                current_values["hs_color"] = target_values.get("hs_color", [0, 0])
+                current_values["brightness"] = 0
+            elif len(current_values["hs_color"]) != 2:
+                raise ValueError(f"Invalid hs_color for {entity_id}: {current_values['hs_color']}")
+
+            # Check if already at target
+            match_status = self.is_at_target(current_values, target_values)
+            
+            if match_status['overall']:
+                self.log(f"Light {entity_id} already at target, skipping transition")
+                return
+            
+            # Determine what needs adjusting
+            needs_brightness = not match_status['brightness']
+            needs_color = not match_status['color']
+            
+            # Log current and target values
+            if current_values.get("color_temp_kelvin") is not None:
+                self.log(f"Current for {entity_id}: brightness={current_values['brightness']}, color_temp={current_values['color_temp_kelvin']}K")
+            else:
+                self.log(f"Current for {entity_id}: brightness={current_values['brightness']}, hs_color={current_values['hs_color']}")
+            
+            use_color_temp_for_target = target_values.get("color_temp_kelvin") is not None
+            if use_color_temp_for_target:
+                self.log(f"Target for {entity_id}: brightness={target_values['brightness']}, color_temp={target_values['color_temp_kelvin']}K")
+            else:
+                self.log(f"Target for {entity_id}: brightness={target_values['brightness']}, hs_color={target_values['hs_color']}")
+            
+            if needs_brightness and needs_color:
+                self.log(f"Both brightness and color need adjustment for {entity_id}")
+            elif needs_brightness:
+                self.log(f"Only brightness needs adjustment for {entity_id}")
+            elif needs_color:
+                self.log(f"Only color needs adjustment for {entity_id}")
+
+            # Calculate steps
+            # Each step takes transition_step_seconds regardless of what's being adjusted
+            total_steps = transition_seconds // self.transition_step_seconds
+            remainder = transition_seconds % self.transition_step_seconds
+            if remainder > 0:
+                total_steps += 1
+            
+            # Determine transition mode (only if color needs adjusting)
+            use_color_temp = False
+            needs_two_phases = False
+            steps_to_white = 0
+            steps_to_target = total_steps
+            
+            if needs_color:
+                # Use color_temp mode if target specifies it
+                use_color_temp = target_values.get("color_temp_kelvin") is not None
+                
+                # Check if we need two-phase transition (via white) - only for hs_color mode
+                if not use_color_temp:
+                    hue_diff = abs(current_values["hs_color"][0] - target_values["hs_color"][0])
+                    if hue_diff > self.hue_difference_threshold:
+                        needs_two_phases = True
+                        self.log(f"Hue diff {hue_diff} > {self.hue_difference_threshold}, using 2-phase transition")
+                
+                # Allocate steps for color transition
+                if needs_two_phases:
+                    # Split steps evenly between white and target phases
+                    steps_to_white = total_steps // 2
+                    steps_to_target = total_steps - steps_to_white
+            
             self.log(
-                f"Error transitioning scene to entity {entity_id}: {traceback.format_exc()}",
-                level="ERROR",
+                f"Plan: {total_steps} steps ({steps_to_white} to-white, {steps_to_target} to-target)"
             )
+            
+            # Setup interpolation parameters
+            brightness_start = None
+            brightness_end = None
+            hue_start = None
+            sat_start = None
+            hue_end = None
+            sat_end = None
+            white_hue = None
+            white_sat = None
+            color_temp_start = None
+            color_temp_end = None
+            
+            if needs_brightness:
+                brightness_start = current_values["brightness"]
+                brightness_end = target_values["brightness"]
+            
+            if needs_color:
+                if use_color_temp:
+                    # For color_temp transitions, use current color_temp if available, otherwise start from target
+                    # (light will switch modes immediately)
+                    color_temp_start = current_values.get("color_temp_kelvin") or target_values["color_temp_kelvin"]
+                    color_temp_end = target_values["color_temp_kelvin"]
+                else:
+                    hue_start, sat_start = current_values["hs_color"]
+                    hue_end, sat_end = target_values["hs_color"]
+                    white_hue = 0
+                    white_sat = 0
+            
+            # Execute transition - brightness first, then color in each step
+            for step in range(total_steps):
+                await self.transition_step(
+                    step=step,
+                    total_steps=total_steps,
+                    remainder=remainder,
+                    needs_brightness=needs_brightness,
+                    needs_color=needs_color,
+                    brightness_start=brightness_start,
+                    brightness_end=brightness_end,
+                    hue_start=hue_start,
+                    sat_start=sat_start,
+                    hue_end=hue_end,
+                    sat_end=sat_end,
+                    white_hue=white_hue,
+                    white_sat=white_sat,
+                    use_color_temp=use_color_temp,
+                    color_temp_start=color_temp_start,
+                    color_temp_end=color_temp_end,
+                    entity_id=entity_id,
+                    steps_to_white=steps_to_white,
+                    steps_to_target=steps_to_target,
+                    needs_two_phases=needs_two_phases,
+                    scene_entity_id=scene_entity_id
+                )
+            
+            # Verify and correct final state
+            await self.verify_and_correct_target(entity_id, target_values)
+            
+            self.log(f"Transition completed for {entity_id}")
+        except asyncio.CancelledError:
+            self.log(f"Transition cancelled for {entity_id}", level="DEBUG")
+            return
+        except ValueError as e:
+            # Wrap validation errors as TransitionError
+            raise TransitionError(str(e), entity_id=entity_id) from e
+        except Exception as e:
+            self.log(f"Error in transition: {traceback.format_exc()}", level="ERROR")
+            raise
+    
+    async def transition_step(self, step, total_steps, remainder, needs_brightness, needs_color, brightness_start, brightness_end, hue_start, sat_start, hue_end, sat_end, white_hue, white_sat, use_color_temp, color_temp_start, color_temp_end, entity_id, steps_to_white, steps_to_target, needs_two_phases, scene_entity_id):
+        step_num = step + 1
+        step_duration = remainder if step_num == total_steps and remainder > 0 else self.transition_step_seconds
+        is_last_step = (step_num == total_steps)
+        
+        # Log step header once at the beginning
+        self.log(f"Step {step_num}/{total_steps}")
+
+        
+        # Determine transition durations based on what needs adjusting
+        if needs_brightness and needs_color:
+            # Split step time in half
+            brightness_duration = step_duration / 2
+            color_duration = step_duration / 2
+        else:
+            # Single attribute gets full step time
+            brightness_duration = step_duration if needs_brightness else 0
+            color_duration = step_duration if needs_color else 0
+        
+        # Apply brightness first if needed
+        if needs_brightness:
+            brightness_progress = step_num / total_steps
+            new_brightness = round(brightness_start + (brightness_end - brightness_start) * brightness_progress)
+            
+            # Subtract 1 from transition to avoid overlap, but only if duration is long enough
+            # and not the last transition overall
+            is_last_transition = is_last_step and not needs_color
+            should_subtract = brightness_duration >= self.transition_step_seconds and not is_last_transition
+            brightness_transition = brightness_duration - 1 if should_subtract else brightness_duration
+            
+            await self.turn_on(entity_id=entity_id, brightness=new_brightness, transition=brightness_transition)
+            # Log brightness
+            self.log(f"a) Brightness target: {new_brightness}")
+            # Log color if not adjusting it (static color)
+            if not needs_color:
+                if use_color_temp and color_temp_end is not None:
+                    self.log(f"b) Color temp target: {color_temp_end}K")
+                elif not use_color_temp and hue_end is not None and sat_end is not None:
+                    self.log(f"b) HS Color target: ({hue_end}, {sat_end})")
+            
+            await self.sleep(brightness_duration)
+        
+            await self.validate_transition_state(
+                entity_id=entity_id,
+                target_values={"brightness": new_brightness, "hs_color": [0, 0], "color_temp_kelvin": None},
+                validation_key="brightness",
+                error_message=f"Brightness validation FAILED for {entity_id}: expected {new_brightness}, got {new_brightness}"
+            )
+        
+        # Apply color second if needed
+        if needs_color:
+            # Determine if we should subtract 1 to avoid overlap
+            # Only for long transitions and not the last transition overall
+            should_subtract = color_duration >= self.transition_step_seconds and not is_last_step
+            color_transition = color_duration - 1 if should_subtract else color_duration
+            
+            if step < steps_to_white:
+                # Color adjustment to white
+                progress = (step + 1) / steps_to_white
+                new_hue = round(hue_start + (white_hue - hue_start) * progress)
+                new_sat = round(sat_start + (white_sat - sat_start) * progress)
+                
+                await self.turn_on(entity_id=entity_id, hs_color=(new_hue, new_sat), transition=color_transition)
+                self.log(f"b) HS Color: ({new_hue}, {new_sat})")
+                await self.sleep(color_duration)
+                
+                await self.validate_transition_state(
+                    entity_id=entity_id,
+                    target_values={"brightness": 0, "hs_color": [new_hue, new_sat], "color_temp_kelvin": None},
+                    validation_key="color",
+                    error_message=f"Color validation FAILED for {entity_id} (white phase): expected ({new_hue}, {new_sat}), got ({new_hue}, {new_sat})"
+                )
+            else:
+                # Color adjustment to target
+                target_step = step - steps_to_white
+                
+                if use_color_temp:
+                    progress = (target_step + 1) / steps_to_target
+                    new_color_temp = round(color_temp_start + (color_temp_end - color_temp_start) * progress)
+                    await self.turn_on(entity_id=entity_id, color_temp_kelvin=new_color_temp, transition=color_transition)
+                    self.log(f"b) Color temp target: {new_color_temp}K")
+                    await self.sleep(color_duration)
+                    
+                    await self.validate_transition_state(
+                        entity_id=entity_id,
+                        target_values={"brightness": 0, "hs_color": [0, 0], "color_temp_kelvin": new_color_temp},
+                        validation_key="color",
+                        error_message=f"Color temp validation FAILED for {entity_id}: expected {new_color_temp}K, got {new_color_temp}K"
+                    )
+                else:
+                    transition_hue_start = white_hue if needs_two_phases else hue_start
+                    transition_sat_start = white_sat if needs_two_phases else sat_start
+                    progress = (target_step + 1) / steps_to_target
+                    new_hue = round(transition_hue_start + (hue_end - transition_hue_start) * progress)
+                    new_sat = round(transition_sat_start + (sat_end - transition_sat_start) * progress)
+                    await self.turn_on(entity_id=entity_id, hs_color=(new_hue, new_sat), transition=color_transition)
+                    self.log(f"b) HS Color target: ({new_hue}, {new_sat})")
+                    await self.sleep(color_duration)
+                    
+                    await self.validate_transition_state(
+                        entity_id=entity_id,
+                        target_values={"brightness": 0, "hs_color": [new_hue, new_sat], "color_temp_kelvin": None},
+                        validation_key="color",
+                        error_message=f"Color validation FAILED for {entity_id} (target phase): expected ({new_hue}, {new_sat}), got ({new_hue}, {new_sat})"
+                    )
+
+
+    async def _cancel_scene_tasks(self, tasks_dict):
+        """
+        Cancel all tasks in a scene.
+        
+        Args:
+            tasks_dict (dict): Dictionary mapping entity_id to task
+        """
+        for entity_id, task in tasks_dict.items():
+            if not task.done():
+                task.cancel()
+        
+        # Wait for all cancellations to complete
+        for task in tasks_dict.values():
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
 
     async def apply_scene(self, scene_entity_id, transition_seconds):
         """
@@ -328,21 +541,50 @@ class SceneTransition(hass.Hass):
         try:
             # Load the scene configuration
             scene_configuration = await self.load_scene_configuration(scene_entity_id)
-
-            # Create tasks for transitioning each entity.
-            # Use create_task because of Appdaemon specifics
+            lights_in_scene = set(scene_configuration.keys())
+            
+            # Find and cancel any OTHER scenes that share lights with this one
+            for other_scene_id, scene_data in list(self._active_scenes.items()):
+                if other_scene_id != scene_entity_id:
+                    lights_in_other_scene = set(scene_data["tasks"].keys())
+                    if lights_in_scene & lights_in_other_scene:  # Intersection found
+                        self.log(f"Cancelling scene {other_scene_id} to start {scene_entity_id} (shared lights)")
+                        await self._cancel_scene_tasks(scene_data["tasks"])
+                        del self._active_scenes[other_scene_id]
+            
+            # Create tasks for transitioning each entity
+            tasks = {}
             for entity_id, target_values in scene_configuration.items():
-                self.create_task(
-                    self.transition_to_scene(entity_id, target_values, transition_seconds),
-                    self.log(f"Adding task for {entity_id}"),
+                task = self.create_task(
+                    self.transition_to_scene(entity_id, target_values, transition_seconds, scene_entity_id)
                 )
-
+                tasks[entity_id] = task
+            
+            # Store the scene and its tasks
+            self._active_scenes[scene_entity_id] = {"tasks": tasks}
+            
+            # Wait for tasks to complete, handling exceptions in real-time
+            for completed_task in asyncio.as_completed(tasks.values()):
+                try:
+                    await completed_task
+                except asyncio.CancelledError:
+                    # This task was cancelled by us, expected
+                    self.log(f"Task {completed_task} was cancelled", level=DEBUG)
+                    pass
+                # BEWARE: Appdaemon (possibly Asyncio) will log this as if not caught, because of how it handles task exceptions. We catch it to 
+                # prevent our app from crashing, but it may still log an error in the Appdaemon logs. This is likely a quirk of handling 
+                # cancellations in Appdaemon. Possible workaround is to return a dict with success/failure status instead of raising exceptions.
+                except Exception as e:
+                    # Task failed - cancel all remaining tasks immediately
+                    self.log("Something went wrong with scene transition. Cancelling transitions (tasks) for entities in scene.", level="DEBUG")
+                    await self._cancel_scene_tasks(tasks)
+                    return
+            
             self.log(f"Scene {scene_entity_id} applied successfully.")
-        except Exception as e:
-            self.log(
-                f"Error applying scene {scene_entity_id}: {traceback.format_exc()}",
-                level="ERROR",
-            )
+        finally:
+            # Clean up the scene record
+            if scene_entity_id in self._active_scenes:
+                del self._active_scenes[scene_entity_id]
 
     async def event_apply_scene(self, event_name, data, kwargs):
         """
@@ -354,6 +596,20 @@ class SceneTransition(hass.Hass):
         scene_entity_id = data.get("scene_entity_id")
         transition_seconds = data.get("transition_seconds")
         transition_minutes = data.get("transition_minutes")
+        only_if_lights_on = data.get("only_if_lights_on", False)
+
+        if only_if_lights_on:
+            # Check if lights on 
+            scene_configuration = await self.load_scene_configuration(scene_entity_id)
+            any_light_on = False
+            for entity_id in scene_configuration.keys():
+                state = await self.get_state(entity_id)
+                if state == "on":
+                    any_light_on = True
+                    break
+            if not any_light_on:
+                self.log(f"Skipping scene {scene_entity_id} application because all lights are off.")
+                return
         
         # Validate scene_entity_id
         if not scene_entity_id:
