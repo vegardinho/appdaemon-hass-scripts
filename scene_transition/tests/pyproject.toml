@@ -1,0 +1,20 @@
+[project]
+name = "scene-transition-tests"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+  "pytest",
+  "pytest-asyncio",
+]
+
+[tool.pytest.ini_options]
+addopts = "-vv -s --durations=10"
+asyncio_mode = "strict"
+asyncio_default_test_loop_scope = "function"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["."]
+markers = [
+  "unit: tests that do not require a running AppDaemon or Home Assistant",
+  "ci: fast tests suitable for CI",
+  "functional: tests requiring a running AppDaemon",
+]

@@ -63,8 +63,12 @@ class ToggleLight(hass.Hass):
             
             # Turn off each light entity
             for entity_id in light_entities:
-                self.log(f"Turning off {entity_id} with {transition_seconds}s transition")
-                await self.turn_off(entity_id=entity_id, transition=transition_seconds)
+                try:
+                    self.log(f"Turning off {entity_id} with {transition_seconds}s transition")
+                    await self.turn_off(entity_id=entity_id, transition=transition_seconds)
+                    
+                except Exception as e:
+                    self.log(f"Error turning off {entity_id}: {e}", level="ERROR")
                     
         except Exception as e:
             self.log(f"Error turning off lights: {e}", level="ERROR")
@@ -76,6 +80,7 @@ class ToggleLight(hass.Hass):
         Args:
             data: Must contain 'calendar_entity_id' and 'transition_seconds'
         """
+        
         calendar_entity_id = data.get("calendar_entity_id")
         transition_seconds = data.get("transition_seconds", 1)
         
@@ -116,7 +121,10 @@ class ToggleLight(hass.Hass):
                 await self.turn_off_scene_lights(current_scene, transition_seconds)
             else:
                 # Just turn on the current scene
-                self.log(f"Lights are off, applying current scene: {current_scene}")
+                self.log(
+                    f"Toggle request found lights off; emitting scene transition "
+                    f"for current calendar scene {current_scene}"
+                )
                 
                 # Fire scene transition event with calendar_entity_id for tracking
                 await self.fire_event(
@@ -124,7 +132,8 @@ class ToggleLight(hass.Hass):
                     scene_entity_id=current_scene,
                     transition_seconds=transition_seconds,
                     only_if_lights_on=False,
-                    calendar_entity_id=calendar_entity_id
+                    calendar_entity_id=calendar_entity_id,
+                    source="manual_toggle"
                 )
                 
         except Exception as e:

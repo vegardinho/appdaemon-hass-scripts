@@ -6,12 +6,21 @@ from datetime import datetime, timedelta
 
 class CalendarSceneState(hass.Hass):
     """
-    Manages calendar-based scene cycling with persistent state.
-    Supports multiple calendars independently.
+        Tracks which calendar scene is active for manual scene cycling.
+
+        This app has two separate responsibilities:
+        - listen to the calendar ``message`` attribute and synchronize the saved
+            cycle index when Home Assistant changes the active event;
+        - handle ``appdaemon_cycle_scene`` events from manual controls.
+
+        The state listener does not apply scenes and does not start transitions.
+        Home Assistant's calendar-start automation sends the separate
+        ``appdaemon_scene_transition`` event directly to SceneTransition.
+        Multiple calendars are supported independently.
     """
 
     async def initialize(self):
-        """Initialize the CalendarManager app."""
+        """Load persistent indices and register calendar/cycle listeners."""
         self.state_file = "/conf/data/calendar_cycle_state.json"
         state_data = await self.load_state()
         self.calendar_indices = state_data.get("indices", {})
@@ -64,7 +73,10 @@ class CalendarSceneState(hass.Hass):
 
     async def register_calendar(self, calendar_entity_id):
         """
-        Register a calendar for state tracking if not already registered.
+        Register a calendar's ``message`` attribute for index synchronization.
+
+        Registration only enables state tracking. It does not subscribe to
+        calendar start events and it does not apply a scene.
         
         Args:
             calendar_entity_id: The calendar entity ID to register
@@ -81,15 +93,21 @@ class CalendarSceneState(hass.Hass):
 
     async def handle_calendar_state_change(self, entity, attribute, old, new, kwargs):
         """
-        Handle calendar state changes (when active event changes).
-        Update the cycle index to match the new active scene.
+        Synchronize the saved index when the active calendar message changes.
+
+        Home Assistant owns the calendar event-start automation. This callback
+        only records which scene is active for a later manual toggle/cycle.
         
         Args:
             entity: The calendar entity ID
             new: The new message attribute (scene entity ID)
         """
         if new and new != old:
-            self.log(f"Calendar {entity} active event changed to: {new}")
+            self.log(
+                f"Calendar state listener triggered for {entity}: "
+                f"message changed from {old!r} to {new!r}; "
+                "synchronizing cycle index only (no scene transition)"
+            )
             await self.update_index_for_scene(entity, new)
 
     async def fetch_calendar_events(self, calendar_entity_id, hours=24):
@@ -166,7 +184,10 @@ class CalendarSceneState(hass.Hass):
 
     async def get_current_scene(self, calendar_entity_id):
         """
-        Get the currently active scene from the calendar's state (based on time).
+        Read the currently active scene for a manual toggle request.
+
+        This is a read operation. It does not start a transition; the caller
+        decides whether to turn the lights off or emit a scene-transition event.
         
         Args:
             calendar_entity_id: The calendar entity ID
@@ -269,7 +290,10 @@ class CalendarSceneState(hass.Hass):
 
     async def handle_cycle_event(self, _event_name, data, _kwargs):
         """
-        Handle appdaemon_cycle_scene events.
+        Handle manual ``appdaemon_cycle_scene`` events.
+
+        Unlike the calendar state listener, this handler advances the saved
+        index and emits a scene-transition event.
         
         Args:
             data: Must contain 'calendar_entity_id', 'transition_seconds', and optional 'reverse'
@@ -330,5 +354,7 @@ class CalendarSceneState(hass.Hass):
             "appdaemon_scene_transition",
             scene_entity_id=next_scene,
             transition_seconds=transition_seconds,
-            only_if_lights_on=False
+            only_if_lights_on=False,
+            calendar_entity_id=calendar_entity_id,
+            source="manual_cycle"
         )
