@@ -214,7 +214,7 @@ async def execute_transition_step(
             await validate_transition_state(
                 app,
                 entity_id=entity_id,
-                target_values={"brightness": 0, "hs_color": [new_hue, new_sat], "color_temp_kelvin": None},
+                target_values={"brightness": brightness_end, "hs_color": [new_hue, new_sat], "color_temp_kelvin": None},
                 validation_key="color",
                 error_message=f"Color validation FAILED for {entity_id} (white phase): expected ({new_hue}, {new_sat}), got ({new_hue}, {new_sat})"
             )
@@ -241,7 +241,7 @@ async def execute_transition_step(
                 await validate_transition_state(
                     app,
                     entity_id=entity_id,
-                    target_values={"brightness": 0, "hs_color": [0, 0], "color_temp_kelvin": new_color_temp},
+                    target_values={"brightness": brightness_end, "hs_color": [0, 0], "color_temp_kelvin": new_color_temp},
                     validation_key="color",
                     error_message=f"Color temp validation FAILED for {entity_id}: expected {new_color_temp}K, got {new_color_temp}K"
                 )
@@ -267,7 +267,7 @@ async def execute_transition_step(
                 await validate_transition_state(
                     app,
                     entity_id=entity_id,
-                    target_values={"brightness": 0, "hs_color": [new_hue, new_sat], "color_temp_kelvin": None},
+                    target_values={"brightness": brightness_end, "hs_color": [new_hue, new_sat], "color_temp_kelvin": None},
                     validation_key="color",
                     error_message=f"Color validation FAILED for {entity_id} (target phase): expected ({new_hue}, {new_sat}), got ({new_hue}, {new_sat})"
                 )

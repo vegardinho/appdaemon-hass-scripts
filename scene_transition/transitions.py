@@ -136,6 +136,8 @@ async def transition_to_light(app, entity_id, target_values, transition_seconds,
         if needs_brightness:
             brightness_start = current_values["brightness"]
             brightness_end = target_values["brightness"]
+        else:
+            brightness_end = target_values["brightness"]
 
         if needs_color:
             if use_color_temp:

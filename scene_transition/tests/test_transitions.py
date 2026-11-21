@@ -424,6 +424,10 @@ async def test_off_light_state_is_allowed_to_propagate_once():
     }
     app = make_app(states)
     app._lights_started_off = {"light.starting_off"}
+    warnings = []
+    app.log_entity = lambda entity_id, message, level="INFO", **kwargs: warnings.append(
+        (entity_id, message, level)
+    )
 
     await validate_transition_state(app,
         "light.starting_off",
@@ -435,6 +439,8 @@ async def test_off_light_state_is_allowed_to_propagate_once():
         validation_key="brightness",
         error_message="mismatch",
     )
+
+    assert ("light.starting_off", "Light did not respond", "WARNING") in warnings
 
 
 async def test_off_light_is_cancelled_after_it_was_on_then_manually_turned_off():

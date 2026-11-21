@@ -105,6 +105,11 @@ async def validate_transition_state(app, entity_id, target_values, validation_ke
         return
 
     if current["state"] == "off":
+        # Positive target brightness means the light should be on.
+        # Zero means it is intentionally transitioning to off.
+        if target_values.get("brightness", 0) > 0:
+            app.log_entity(entity_id, "Light did not respond", level="WARNING")
+
         if entity_id in getattr(app, "_lights_started_off", set()):
             app.log_entity(entity_id, "Light is starting from off; waiting for the turn-on state to propagate.", level="DEBUG")
             return
@@ -142,6 +147,11 @@ async def verify_and_correct_target(app, entity_id, target_values, started_off=N
         return
 
     if final_values["state"] == "off":
+        # Positive target brightness means the light should be on.
+        # Zero means it is intentionally transitioning to off.
+        if target_values.get("brightness", 0) > 0:
+            app.log_entity(entity_id, "Light did not respond", level="WARNING")
+
         if started_off is None:
             started_off = entity_id in getattr(app, "_lights_started_off", set())
         if started_off:
