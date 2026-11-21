@@ -106,3 +106,12 @@ async def find_off_members(entity_id, get_light_attributes):
     group = await get_light_attributes(entity_id)
     await inspect(group["member_entity_ids"])
     return off_members
+
+
+async def get_light_attributes(app, entity_id):
+    state = await app.get_state(entity_id, attribute="all")
+    return normalize_light_state(entity_id, state)
+
+
+async def get_off_group_members(app, entity_id):
+    return await find_off_members(entity_id, lambda member_id: get_light_attributes(app, member_id))

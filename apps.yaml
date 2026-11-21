@@ -5,7 +5,7 @@
 #   mm_token: !secret mm_token
 
 scene_transition:
- module: scene_transition.scene_transition
+ module: scene_transition.app
  class: SceneTransition
 
 calendar_scene_state:

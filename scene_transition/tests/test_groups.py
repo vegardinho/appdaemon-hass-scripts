@@ -4,8 +4,11 @@ import pytest
 
 from conftest import make_app, state
 
-from scene_transition.scene_transition import SceneTransition, TransitionError
-from scene_transition.scene_transition_color import (
+from scene_transition.app import SceneTransition, TransitionError
+from scene_transition.lights import get_light_attributes, get_off_group_members
+from scene_transition.scenes import expand_scene_configuration
+from scene_transition.validation import validate_transition_state
+from scene_transition.color import (
     adapt_target_to_light,
     convert_hs_to_kelvin,
     get_kelvin_range,
@@ -13,31 +16,24 @@ from scene_transition.scene_transition_color import (
     supports_hs_or_xy,
     supports_kelvin,
 )
-from scene_transition.scene_transition_lights import (
+from scene_transition.lights import (
     classify_light_state,
     expand_light_entities,
     normalize_light_state,
     parse_group_entities,
 )
-from scene_transition.scene_transition_validation import (
+from scene_transition.validation import (
     describe_target_mismatch,
     get_corrections_needed,
     get_required_validation_value,
     is_at_target,
 )
-from scene_transition.scene_transition_steps import (
+from scene_transition.steps import (
     calculate_phase_plan,
     calculate_step_count,
     calculate_step_duration,
     interpolate,
     interpolate_hs,
-    split_attribute_durations,
-)
-from scene_transition.scene_transition_service_calls import (
-    assert_no_legacy_kelvin,
-    brightness_turn_on_kwargs,
-    hs_turn_on_kwargs,
-    kelvin_turn_on_kwargs,
 )
 
 
@@ -57,7 +53,7 @@ async def test_group_entities_attribute_is_parsed():
         }),
     })
 
-    attributes = await app.get_light_attributes("light.group")
+    attributes = await get_light_attributes(app, "light.group")
 
     assert attributes["member_entity_ids"] == [
         "light.vegard_taklampe",
@@ -76,7 +72,7 @@ async def test_comma_separated_group_entities_are_parsed():
         }),
     })
 
-    attributes = await app.get_light_attributes("light.group")
+    attributes = await get_light_attributes(app, "light.group")
 
     assert attributes["member_entity_ids"] == [
         "light.vegard_taklampe",
@@ -94,7 +90,7 @@ async def test_other_member_attributes_are_not_accepted():
         }),
     })
 
-    attributes = await app.get_light_attributes("light.group")
+    attributes = await get_light_attributes(app, "light.group")
 
     assert attributes["member_entity_ids"] == []
 
@@ -111,7 +107,7 @@ async def test_off_group_member_is_detected():
         "light.member_off": state("off"),
     })
 
-    off_members = await app.get_off_group_members("light.group")
+    off_members = await get_off_group_members(app, "light.group")
 
     assert off_members == ["light.member_off"]
 
@@ -124,7 +120,7 @@ async def test_unavailable_group_member_is_not_treated_as_off():
         "light.member_unavailable": state("unavailable"),
     })
 
-    off_members = await app.get_off_group_members("light.group")
+    off_members = await get_off_group_members(app, "light.group")
 
     assert off_members == []
 
@@ -140,7 +136,7 @@ async def test_validation_cancels_for_off_group_member():
     })
 
     with pytest.raises(ValueError, match="contains off member"):
-        await app.validate_transition_state(
+        await validate_transition_state(app,
             "light.group",
             target_values={
                 "brightness": 120,
@@ -160,7 +156,7 @@ async def test_individual_light_has_no_group_members():
         }),
     })
 
-    attributes = await app.get_light_attributes("light.individual")
+    attributes = await get_light_attributes(app, "light.individual")
 
     assert attributes["member_entity_ids"] == []
 
@@ -195,7 +191,7 @@ async def test_expand_nested_group_deduplicates_and_skips_unavailable():
     })
 
     async def get_attributes(entity_id):
-        return await app.get_light_attributes(entity_id)
+        return await get_light_attributes(app, entity_id)
 
     expanded = await expand_light_entities("light.group", get_attributes)
 
@@ -217,7 +213,7 @@ async def test_expand_group_skips_unknown_and_unavailable_members():
     })
 
     async def get_attributes(entity_id):
-        return await app.get_light_attributes(entity_id)
+        return await get_light_attributes(app, entity_id)
 
     expanded = await expand_light_entities("light.group", get_attributes)
 
@@ -236,7 +232,7 @@ async def test_expand_group_cycle_is_safe():
     })
 
     async def get_attributes(entity_id):
-        return await app.get_light_attributes(entity_id)
+        return await get_light_attributes(app, entity_id)
 
     expanded = await expand_light_entities("light.group_a", get_attributes)
 
@@ -273,7 +269,7 @@ async def test_expand_scene_configuration_mixes_individual_and_group_entities():
         },
     }
 
-    expanded = await app.expand_scene_configuration(scene_configuration)
+    expanded = await expand_scene_configuration(app, scene_configuration)
 
     assert set(expanded) == {
         "light.individual",
@@ -307,7 +303,7 @@ async def test_expand_scene_configuration_deduplicates_shared_member():
         },
     }
 
-    expanded = await app.expand_scene_configuration(scene_configuration)
+    expanded = await expand_scene_configuration(app, scene_configuration)
 
     assert list(expanded) == ["light.member"]
     assert expanded["light.member"] == scene_configuration["light.group_a"]

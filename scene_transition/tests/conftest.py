@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import sys
 import types
 from pathlib import Path
@@ -17,16 +18,25 @@ sys.modules.setdefault("yaml", yaml)
 APPS_DIR = Path(__file__).parents[2]
 sys.path.insert(0, str(APPS_DIR))
 
-from scene_transition.scene_transition import SceneTransition
+from scene_transition.app import SceneTransition
+import scene_transition.transitions as transitions_module
+import scene_transition.steps as steps_module
 
 
 def pytest_collection_modifyitems(items):
     for item in items:
-        item.add_marker("asyncio")
+        if inspect.iscoroutinefunction(item.obj):
+            item.add_marker("asyncio")
         item.add_marker("unit")
 
 
 def make_app(states):
+    async def no_op(*args, **kwargs):
+        return None
+
+    transitions_module.verify_and_correct_target = no_op
+    steps_module.validate_transition_state = no_op
+
     app = object.__new__(SceneTransition)
     app.transition_step_seconds = 30
     app.hue_difference_threshold = 120
