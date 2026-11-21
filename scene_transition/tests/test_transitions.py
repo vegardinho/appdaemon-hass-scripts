@@ -202,6 +202,89 @@ async def test_off_hs_light_is_turned_on_with_brightness_and_color():
     assert hs_calls == [(0, 0), (220, 60)]
 
 
+async def test_off_hs_light_preserves_reported_color_baseline():
+    app = make_app({
+        "light.off": state("off", {
+            "brightness": 0,
+            "hs_color": [200, 50],
+            "supported_color_modes": ["xy"],
+        }),
+    })
+    calls = []
+
+    async def turn_on(entity_id, **kwargs):
+        calls.append((entity_id, kwargs))
+
+    async def no_op(*args, **kwargs):
+        return None
+
+    app.turn_on = turn_on
+    app.sleep = no_op
+    app.validate_transition_state = no_op
+    app.verify_and_correct_target = no_op
+
+    await app.transition_to_scene(
+        "light.off",
+        {
+            "brightness": 100,
+            "hs_color": [220, 60],
+            "color_temp_kelvin": None,
+        },
+        transition_seconds=60,
+        scene_entity_id="scene.test",
+    )
+
+    hs_calls = [
+        kwargs["hs_color"]
+        for _entity_id, kwargs in calls
+        if "hs_color" in kwargs
+    ]
+    assert hs_calls == [(210, 55), (220, 60)]
+
+
+async def test_off_kelvin_light_clamps_scene_target_to_bulb_maximum():
+    app = make_app({
+        "light.ikea": state("off", {
+            "brightness": 0,
+            "hs_color": None,
+            "color_temp_kelvin": None,
+            "supported_color_modes": ["color_temp"],
+            "min_color_temp_kelvin": 2202,
+            "max_color_temp_kelvin": 4000,
+        }),
+    })
+    calls = []
+
+    async def turn_on(entity_id, **kwargs):
+        calls.append((entity_id, kwargs))
+
+    async def no_op(*args, **kwargs):
+        return None
+
+    app.turn_on = turn_on
+    app.sleep = no_op
+    app.validate_transition_state = no_op
+    app.verify_and_correct_target = no_op
+
+    await app.transition_to_scene(
+        "light.ikea",
+        {
+            "brightness": 255,
+            "hs_color": [219, 49],
+            "color_temp_kelvin": 5198,
+        },
+        transition_seconds=1,
+        scene_entity_id="scene.test",
+    )
+
+    kelvin_calls = [
+        kwargs["color_temp_kelvin"]
+        for _entity_id, kwargs in calls
+        if "color_temp_kelvin" in kwargs
+    ]
+    assert kelvin_calls == [4000]
+
+
 async def test_off_brightness_only_light_needs_no_hs_color():
     app = make_app({
         "light.hue_plug": state("off", {

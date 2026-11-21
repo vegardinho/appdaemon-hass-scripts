@@ -384,11 +384,12 @@ class SceneTransition(hass.Hass):
             # brightness before transitioning it on. Kelvin-only lights may
             # legitimately report hs_color=None while their state is on.
             if current_values["state"] == "off":
-                # Start from neutral color and zero brightness. This ensures an
-                # HS transition sends an explicit color command rather than
-                # treating the target color as already reached.
+                # Start at zero brightness. Preserve a reported HS baseline for
+                # bulbs that retain their color while off; only use neutral HS
+                # if the bulb reports no known color.
                 self.log_entity(entity_id, "Light is currently off, will transition from off state")
-                current_values["hs_color"] = [0, 0]
+                if current_values["hs_color"] is None:
+                    current_values["hs_color"] = [0, 0]
                 current_values["brightness"] = 0
                 getattr(self, "_lights_started_off", set()).add(entity_id)
             elif current_values["hs_color"] is not None and len(current_values["hs_color"]) != 2:

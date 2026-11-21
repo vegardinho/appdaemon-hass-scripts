@@ -31,6 +31,19 @@ def get_kelvin_range(attributes):
     return minimum, maximum
 
 
+def clamp_kelvin(kelvin, attributes):
+    if kelvin is None:
+        return None
+
+    minimum, maximum = get_kelvin_range(attributes)
+    clamped = kelvin
+    if minimum is not None:
+        clamped = max(clamped, minimum)
+    if maximum is not None:
+        clamped = min(clamped, maximum)
+    return clamped
+
+
 def convert_hs_to_kelvin(hs_color):
     if not hs_color or len(hs_color) != 2:
         return None
@@ -63,11 +76,19 @@ def adapt_target_to_light(light_attributes, scene_target):
     if supports_kelvin_mode and not supports_hs_mode:
         if adapted["color_temp_kelvin"] is None and hs_color is not None:
             adapted["color_temp_kelvin"] = convert_hs_to_kelvin(hs_color)
+        adapted["color_temp_kelvin"] = clamp_kelvin(
+            adapted["color_temp_kelvin"],
+            light_attributes,
+        )
         adapted["hs_color"] = [0, 0]
         return adapted
 
     if supports_hs_mode:
         if adapted["color_temp_kelvin"] is not None:
+            adapted["color_temp_kelvin"] = clamp_kelvin(
+                adapted["color_temp_kelvin"],
+                light_attributes,
+            )
             adapted["hs_color"] = [0, 0]
             return adapted
         return adapted

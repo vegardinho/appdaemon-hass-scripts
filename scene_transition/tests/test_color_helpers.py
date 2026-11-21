@@ -7,6 +7,7 @@ from conftest import make_app, state
 from scene_transition.scene_transition import SceneTransition, TransitionError
 from scene_transition.scene_transition_color import (
     adapt_target_to_light,
+    clamp_kelvin,
     convert_hs_to_kelvin,
     get_kelvin_range,
     hs_to_kelvin,
@@ -88,6 +89,17 @@ async def test_kelvin_range_helper():
     assert get_kelvin_range(attributes) == (2202, 4000)
 
 
+async def test_clamp_kelvin_to_bulb_range():
+    attributes = {
+        "min_color_temp_kelvin": 2202,
+        "max_color_temp_kelvin": 4000,
+    }
+
+    assert clamp_kelvin(5198, attributes) == 4000
+    assert clamp_kelvin(1800, attributes) == 2202
+    assert clamp_kelvin(3500, attributes) == 3500
+
+
 async def test_adapt_target_for_kelvin_only_light():
     light = {
         "supported_color_modes": ["color_temp"],
@@ -104,8 +116,41 @@ async def test_adapt_target_for_kelvin_only_light():
     assert adapted == {
         "brightness": 150,
         "hs_color": [0, 0],
-        "color_temp_kelvin": 4250,
+        "color_temp_kelvin": 4000,
     }
+
+
+async def test_adapt_target_clamps_scene_kelvin_to_bulb_maximum():
+    light = {
+        "supported_color_modes": ["color_temp"],
+        "min_color_temp_kelvin": 2202,
+        "max_color_temp_kelvin": 4000,
+    }
+
+    adapted = adapt_target_to_light(light, {
+        "brightness": 255,
+        "hs_color": [219, 49],
+        "color_temp_kelvin": 5198,
+    })
+
+    assert adapted["color_temp_kelvin"] == 4000
+    assert adapted["hs_color"] == [0, 0]
+
+
+async def test_adapt_hs_conversion_clamps_to_bulb_maximum():
+    light = {
+        "supported_color_modes": ["color_temp"],
+        "min_color_temp_kelvin": 2202,
+        "max_color_temp_kelvin": 4000,
+    }
+
+    adapted = adapt_target_to_light(light, {
+        "brightness": 255,
+        "hs_color": [300, 50],
+        "color_temp_kelvin": None,
+    })
+
+    assert adapted["color_temp_kelvin"] == 4000
 
 
 async def test_adapt_target_preserves_hs_for_xy_light():
